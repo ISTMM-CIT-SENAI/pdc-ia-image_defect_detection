@@ -1,2 +1,11 @@
 dataset_falhas
 .venv
+dataset_processado
+dataset_processado_split
+resultados
+dataset_atual
+dataset_atual_crop
+dataset_externo
+dataset_rgb
+dataset_rgb_crop
+sam2

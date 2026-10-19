@@ -9,3 +9,7 @@ dataset_externo
 dataset_rgb
 dataset_rgb_crop
 sam2
+dataset_externo_test
+dataset_externo_processado_split
+src_19_10_atual.zip
+dataset_externo_processado

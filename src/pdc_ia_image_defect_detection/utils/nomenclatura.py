@@ -2,35 +2,49 @@
 nomenclatura.py
 
 Objetivo:
-- Centraliza as regras de nomenclatura e rotulagem do dataset principal.
-- Relaciona as pastas dos materiais aos codigos usados nos nomes das imagens.
-- Relaciona cada condicao ao rotulo da rede e ao codigo RAC esperado.
-- Interpreta e valida nomes no formato MATERIAL_CP_RAC.
+- Reunir apenas regras genericas de nomenclatura dos arquivos internos.
+- Interpretar nomes no formato MATERIAL_CP_RAC.
+- Validar os codigos de material, corpo de prova e RAC.
+- Interpretar separadamente os tres componentes do codigo RAC.
+- Permitir reutilizacao por qualquer etapa do projeto sem conhecer datasets,
+  pastas de classes ou caminhos de entrada e saida.
 
-Usado por:
-- pre_processing_data.py: valida material, condicao, nome e RAC.
-- split.py: valida os nomes e identifica os rotulos.
-- augmentation_train.py e images_dataset.py: utilizam ROTULOS.
-- predict_imagens.py: interpreta imagens que seguem o padrao principal.
+Formato oficial:
+- <MATERIAL>_<CP>_<RAC>.<extensao>
 
-Parametros ajustaveis:
-- MATERIAIS: pastas dos materiais e seus codigos.
-- CONDICOES: pastas das condicoes, rotulos e RAC esperado.
-- ROTULOS: classes utilizadas pelo modelo.
-- PADRAO_NOME: expressao regular da nomenclatura principal.
+Materiais:
+- AL   -> aluminio
+- A36  -> aco A36
+- FoFo -> ferro fundido
 
-Padrao principal:
-- MATERIAL_CP_RAC
-- MATERIAL: AL, A36 ou FoFo.
-- CP: numero do corpo de prova ou XNN para CP extra.
-- RAC: Risco-Amassamento-Corrosao, com valores de 0 a 3.
-- Ex.: AL_10_001, A36_42_020, FoFo_X01_000.
+Corpo de prova:
+- CP numerico original, por exemplo: 10, 42, 55.
+- CP adicional no formato XNN, por exemplo: X01, X03, X15.
+
+Codigo RAC:
+- Possui exatamente tres digitos.
+- Ordem: Risco, Amassamento, Corrosao.
+- Cada digito aceita valores de 0 a 3:
+    0 -> ausente
+    1 -> leve
+    2 -> moderado
+    3 -> severo
+- 000 representa ausencia de risco, amassamento e corrosao.
+- Combinacoes entre defeitos sao permitidas pelo padrao de nomenclatura.
+
+Exemplos validos:
+- AL_10_001.jpg
+- A36_42_020.png
+- FoFo_55_300.jpg
+- AL_X01_000.png
+- AL_X01_102.png
 
 Observacoes:
-- Alteracoes neste arquivo podem afetar todo o pipeline.
-- O codigo X identifica um CP extra; nao representa uma classe ou defeito.
-- Os aliases "corrosa_*" existem por causa da nomenclatura atual de algumas pastas.
-- A nomenclatura externa MATERIAL_CP_CLASSE e tratada separadamente em predict_imagens.py.
+- Este modulo nao conhece a estrutura material/condicao/imagem do dataset.
+- Este modulo nao decide em qual pasta ou classe uma imagem deve ficar.
+- A coerencia entre nome do arquivo e pasta de origem pertence a classe
+  responsavel pela preparacao do dataset.
+- A extensao do arquivo nao participa da interpretacao do nome.
 """
 
 from pathlib import Path
@@ -38,78 +52,212 @@ import re
 
 
 # =============================================================================
-# PARAMETROS AJUSTAVEIS - REGRAS CENTRAIS DE NOMENCLATURA
+# CONSTANTES DE NOMENCLATURA
 # =============================================================================
 
-# Pasta do material -> codigo usado no nome da imagem
+# Codigos de material aceitos no primeiro campo do nome.
 MATERIAIS = {
-    "aco_2500": "A36",
-    "Aluminio_2500": "AL",
-    "ferro_fundido_4500": "FoFo",
+    "AL": "aluminio",
+    "A36": "aco_A36",
+    "FoFo": "ferro_fundido",
 }
 
-# Pasta da condicao -> (rotulo da rede, RAC esperado)
-CONDICOES = {
-    "sem_defeito": ("sem_falha", "000"),
+# Classes finais atualmente utilizadas pelo classificador.
+ROTULOS = (
+    "amassamento",
+    "corrosao",
+    "risco",
+    "sem_falha",
+)
 
-    "risco_leve": ("risco", "100"),
-    "risco_moderado": ("risco", "200"),
-    "risco_severo": ("risco", "300"),
+# Ordem fixa dos tres digitos do codigo RAC.
+ORDEM_RAC = (
+    "risco",
+    "amassamento",
+    "corrosao",
+)
 
-    "amassamento_leve": ("amassamento", "010"),
-    "amassamento_moderado": ("amassamento", "020"),
-    "amassamento_severo": ("amassamento", "030"),
-
-    "corrosao_leve": ("corrosao", "001"),
-    "corrosao_moderado": ("corrosao", "002"),
-    "corrosao_severo": ("corrosao", "003"),
-
-    # Aliases existentes no dataset atual
-    "corrosa_leve": ("corrosao", "001"),
-    "corrosa_moderado": ("corrosao", "002"),
-    "corrosa_severo": ("corrosao", "003"),
+# Significado das intensidades permitidas em cada posicao do RAC.
+INTENSIDADES = {
+    0: "ausente",
+    1: "leve",
+    2: "moderado",
+    3: "severo",
 }
 
-# Classes finais utilizadas pela rede
-ROTULOS = ["amassamento", "corrosao", "risco", "sem_falha"]
-
-# MATERIAL_CP_RAC | CP numerico ou XNN
-PADRAO_NOME = re.compile(r"^(AL|A36|FoFo)_((?:X\d{2})|(?:\d+))_([0-3]{3})$")
-
-
-def interpretar_nome(caminho):
-    # Extrai material, CP e RAC do nome
-    caminho = Path(caminho)
-    correspondencia = PADRAO_NOME.fullmatch(caminho.stem)
-
-    if correspondencia is None: raise ValueError(f"Nome fora do padrao MATERIAL_CP_RAC: {caminho.name}")
-
-    material, cp, rac = correspondencia.groups()
-    return {"material": material, "cp": cp, "rac": rac}
+# Formato oficial MATERIAL_CP_RAC.
+# CP aceita numero original ou identificador adicional XNN.
+PADRAO_NOME = re.compile(
+    r"^(?P<material>AL|A36|FoFo)_"
+    r"(?P<cp>(?:\d+|X\d{2}))_"
+    r"(?P<rac>\d{3})$"
+)
 
 
-def validar_imagem(caminho, pasta_material, pasta_condicao):
-    # Confere pasta, material e RAC antes do pre-processamento
-    if pasta_material not in MATERIAIS: raise ValueError(f"Pasta de material desconhecida: {pasta_material}")
-    if pasta_condicao not in CONDICOES: raise ValueError(f"Pasta de condicao desconhecida: {pasta_condicao}")
+# =============================================================================
+# INTERPRETACAO DO CODIGO RAC
+# =============================================================================
 
-    dados_nome = interpretar_nome(caminho)
-    material_esperado = MATERIAIS[pasta_material]
-    rotulo, rac_esperado = CONDICOES[pasta_condicao]
+def interpretar_rac(rac):
+    """
+    Interpreta e valida um codigo RAC.
 
-    if dados_nome["material"] != material_esperado:
-        raise ValueError(
-            f"Material inconsistente em {Path(caminho).name}: "
-            f"pasta={material_esperado}, nome={dados_nome['material']}"
+    Parameters
+    ----------
+    rac : str
+        Codigo com exatamente tres digitos na ordem
+        Risco-Amassamento-Corrosao.
+
+    Returns
+    -------
+    dict
+        Valores individuais, niveis e defeitos presentes.
+
+        rotulo_unico recebe:
+        - "sem_falha" quando RAC == "000";
+        - o nome do defeito quando somente um defeito esta presente;
+        - None quando existe combinacao de dois ou tres defeitos.
+
+    Raises
+    ------
+    TypeError
+        Quando rac nao e uma string.
+
+    ValueError
+        Quando o RAC nao possui exatamente tres digitos ou algum digito
+        esta fora do intervalo permitido de 0 a 3.
+    """
+
+    # Mantem o codigo textual exatamente como aparece no nome do arquivo.
+    if not isinstance(rac, str):
+        raise TypeError(
+            f"RAC deve ser string, recebido {type(rac).__name__}."
         )
 
-    if dados_nome["rac"] != rac_esperado:
+    # O campo RAC precisa possuir exatamente tres caracteres numericos.
+    if len(rac) != 3 or not rac.isdigit():
         raise ValueError(
-            f"RAC inconsistente em {Path(caminho).name}: "
-            f"pasta={rac_esperado}, nome={dados_nome['rac']}"
+            f"RAC invalido: '{rac}'. Esperado exatamente tres digitos."
         )
+
+    # Converte as tres posicoes para inteiros mantendo a ordem oficial.
+    valores = tuple(int(digito) for digito in rac)
+
+    # Cada posicao aceita somente intensidades entre zero e tres.
+    if any(valor not in INTENSIDADES for valor in valores):
+        raise ValueError(
+            f"RAC invalido: '{rac}'. Cada digito deve estar entre 0 e 3."
+        )
+
+    # Associa explicitamente cada posicao ao respectivo defeito.
+    risco, amassamento, corrosao = valores
+
+    # Identifica todos os defeitos presentes. Combinacoes sao permitidas.
+    defeitos_presentes = tuple(
+        nome
+        for nome, valor in zip(ORDEM_RAC, valores)
+        if valor > 0
+    )
+
+    # O rotulo unico so existe quando a interpretacao e inequivoca.
+    if not defeitos_presentes:
+        rotulo_unico = "sem_falha"
+    elif len(defeitos_presentes) == 1:
+        rotulo_unico = defeitos_presentes[0]
+    else:
+        rotulo_unico = None
 
     return {
-        "rotulo": rotulo, "material": dados_nome["material"], "cp": dados_nome["cp"], "rac": dados_nome["rac"],
-        "pasta_material": pasta_material, "pasta_condicao": pasta_condicao,
+        "rac": rac,
+        "risco": risco,
+        "amassamento": amassamento,
+        "corrosao": corrosao,
+        "nivel_risco": INTENSIDADES[risco],
+        "nivel_amassamento": INTENSIDADES[amassamento],
+        "nivel_corrosao": INTENSIDADES[corrosao],
+        "defeitos_presentes": defeitos_presentes,
+        "rotulo_unico": rotulo_unico,
     }
+
+
+# =============================================================================
+# INTERPRETACAO DO NOME
+# =============================================================================
+
+def interpretar_nome(caminho_ou_nome):
+    """
+    Interpreta um nome no formato MATERIAL_CP_RAC.
+
+    Parameters
+    ----------
+    caminho_ou_nome : str ou Path
+        Nome simples ou caminho completo do arquivo.
+        A extensao e ignorada durante a interpretacao.
+
+    Returns
+    -------
+    dict
+        Campos extraidos e validados.
+
+    Raises
+    ------
+    ValueError
+        Quando o nome nao segue o padrao oficial ou algum campo e invalido.
+    """
+
+    # Path permite receber tanto um nome simples quanto um caminho completo.
+    caminho = Path(caminho_ou_nome)
+
+    # Somente o stem participa da nomenclatura.
+    stem = caminho.stem
+
+    # Separa MATERIAL, CP e RAC conforme o padrao oficial.
+    correspondencia = PADRAO_NOME.fullmatch(stem)
+    if correspondencia is None:
+        raise ValueError(
+            f"Nome invalido: '{caminho.name}'. "
+            "Esperado MATERIAL_CP_RAC, com CP numerico ou XNN."
+        )
+
+    material = correspondencia.group("material")
+    cp = correspondencia.group("cp")
+    rac = correspondencia.group("rac")
+
+    # Mantem a constante MATERIAIS como fonte central do significado do codigo.
+    if material not in MATERIAIS:
+        raise ValueError(
+            f"Material desconhecido no arquivo '{caminho.name}': {material}."
+        )
+
+    # Interpreta e valida separadamente o codigo RAC.
+    dados_rac = interpretar_rac(rac)
+
+    return {
+        "material": material,
+        "material_nome": MATERIAIS[material],
+        "cp": cp,
+        **dados_rac,
+    }
+
+
+# =============================================================================
+# VALIDACAO SIMPLES
+# =============================================================================
+
+def validar_nome(caminho_ou_nome):
+    """
+    Valida um nome interno e retorna sua interpretacao completa.
+
+    Parameters
+    ----------
+    caminho_ou_nome : str ou Path
+        Nome simples ou caminho completo do arquivo.
+
+    Returns
+    -------
+    dict
+        Mesmo resultado produzido por interpretar_nome().
+    """
+
+    # interpretar_nome concentra todas as validacoes genericas do nome.
+    return interpretar_nome(caminho_ou_nome)

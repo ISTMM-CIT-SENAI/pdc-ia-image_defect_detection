@@ -1,32 +1,62 @@
-import torch
+"""
+lenet5.py
+
+Objetivo:
+- Definir exclusivamente a arquitetura LeNet5 utilizada pelo projeto.
+- Receber imagens grayscale no formato (N,1,H,W).
+- Manter a dimensao da primeira camada totalmente conectada independente da
+  resolucao espacial usando nn.LazyLinear.
+
+Observacoes:
+- Este arquivo nao conhece datasets, caminhos, treinamento ou checkpoints.
+- A quantidade de classes e recebida no construtor.
+- A entrada possui um unico canal porque o pre-processamento final e grayscale.
+"""
+
 import torch.nn as nn
 
+
 class LeNet5(nn.Module):
-    def __init__(self, num_classes=10):
+    """
+    Implementa a rede convolucional LeNet5 adaptada ao projeto.
+
+    Parameters
+    ----------
+    num_classes : int
+        Quantidade de classes de saida do classificador.
+
+    Notes
+    -----
+    A primeira camada Linear utiliza LazyLinear para inferir automaticamente a
+    quantidade de atributos produzida pelas camadas convolucionais. Assim, a
+    arquitetura nao precisa manter um valor fixo dependente da resolucao da
+    imagem.
+    """
+
+    def __init__(self, num_classes=4):
         super().__init__()
 
-        # Bloco convolucional
+        # Extrator convolucional para imagens grayscale com um unico canal.
         self.features = nn.Sequential(
-            nn.Conv2d(in_channels=3, out_channels=6, kernel_size=5, padding=2),
-            nn.Tanh(),
-            nn.AvgPool2d(kernel_size=2, stride=2),
-
+            nn.Conv2d(in_channels=1, out_channels=6, kernel_size=5, padding=2),
+            nn.ReLU(inplace=True),
+            nn.AvgPool2d(kernel_size=5, stride=5),
             nn.Conv2d(in_channels=6, out_channels=16, kernel_size=5),
-            nn.Tanh(),
-            nn.AvgPool2d(kernel_size=2, stride=2),
+            nn.ReLU(inplace=True),
+            nn.AvgPool2d(kernel_size=5, stride=5),
         )
 
-        # Bloco totalmente conectado (classificador)
+        # Classificador final. LazyLinear calcula in_features no primeiro forward.
         self.classifier = nn.Sequential(
-            nn.Linear(1032256, 120),
-            nn.Tanh(),
+            nn.Flatten(),
+            nn.LazyLinear(120),
+            nn.ReLU(inplace=True),
             nn.Linear(120, 84),
-            nn.Tanh(),
-            nn.Linear(84, num_classes),
+            nn.ReLU(inplace=True),
+            nn.Linear(84, int(num_classes)),
         )
 
     def forward(self, x):
+        """Executa extracao de atributos e classificacao."""
         x = self.features(x)
-        x = torch.flatten(x, start_dim=1)  # achata tudo, exceto a dimensão do batch
-        x = self.classifier(x)
-        return x  # logits (sem softmax) -- a função de perda cuida disso
+        return self.classifier(x)

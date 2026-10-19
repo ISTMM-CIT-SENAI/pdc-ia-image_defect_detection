@@ -1,1 +1,0 @@
-#incluir funcoes de pre processamento das imagens.

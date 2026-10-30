@@ -23,9 +23,12 @@ import matplotlib.pyplot as plt
 from sklearn.metrics import (
     ConfusionMatrixDisplay,
     accuracy_score,
+    balanced_accuracy_score,
     classification_report,
+    cohen_kappa_score,
     confusion_matrix,
     f1_score,
+    matthews_corrcoef,
     precision_score,
     recall_score,
 )
@@ -159,6 +162,9 @@ def calcular_metricas_classificacao(rotulos_reais, predicoes, classes):
 
     metricas = {
         "accuracy": accuracy_score(rotulos_reais, predicoes),
+        "balanced_accuracy": balanced_accuracy_score(rotulos_reais, predicoes),
+        "mcc": matthews_corrcoef(rotulos_reais, predicoes),
+        "cohen_kappa": cohen_kappa_score(rotulos_reais, predicoes),
         "precision_macro": precision_score(
             rotulos_reais,
             predicoes,
@@ -246,6 +252,9 @@ def salvar_metricas_classificacao(metricas, relatorio, loss, caminho, titulo="TE
         "",
         f"Loss:               {float(loss):.6f}",
         f"Acuracia:           {metricas['accuracy']:.6f}",
+        f"Acuracia balanceada:{metricas['balanced_accuracy']:>10.6f}",
+        f"MCC:                {metricas['mcc']:.6f}",
+        f"Cohen kappa:        {metricas['cohen_kappa']:.6f}",
         f"Precisao macro:     {metricas['precision_macro']:.6f}",
         f"Recall macro:       {metricas['recall_macro']:.6f}",
         f"F1-score macro:     {metricas['f1_macro']:.6f}",
@@ -262,28 +271,35 @@ def salvar_metricas_classificacao(metricas, relatorio, loss, caminho, titulo="TE
     caminho.write_text("\n".join(linhas), encoding="utf-8")
 
 
+def _salvar_matriz_csv(matriz, classes, caminho, formato):
+    """Salva uma matriz quadrada com nomes de classes em CSV."""
+
+    caminho = Path(caminho)
+    with caminho.open("w", newline="", encoding="utf-8-sig") as arquivo:
+        escritor = csv.writer(arquivo, delimiter=";")
+        escritor.writerow(["real/predito", *classes])
+
+        for classe, linha in zip(classes, matriz):
+            escritor.writerow(
+                [
+                    classe,
+                    *(formato(valor) for valor in linha),
+                ]
+            )
+
+
 def plotar_matrizes_confusao(rotulos_reais, predicoes, classes, pasta_saida, prefixo="teste"):
     """
-    Gera matrizes de confusao absoluta e normalizada.
+    Gera e salva matrizes de confusao absoluta e normalizada em PNG e CSV.
 
-    Parameters
-    ----------
-    rotulos_reais, predicoes : sequence[int]
-        Rotulos utilizados no calculo.
-
-    classes : sequence[str]
-        Nomes apresentados nos eixos.
-
-    pasta_saida : str ou Path
-        Diretorio que recebera os PNG.
-
-    prefixo : str
-        Prefixo utilizado nos nomes dos arquivos gerados.
+    O prefixo identifica o conjunto avaliado, por exemplo:
+    ``teste``, ``treino_final`` ou ``validacao_final``.
     """
 
     pasta_saida = Path(pasta_saida)
     pasta_saida.mkdir(parents=True, exist_ok=True)
     indices = list(range(len(classes)))
+    titulo = str(prefixo).replace("_", " ").strip().title()
 
     matriz = confusion_matrix(
         rotulos_reais,
@@ -298,7 +314,20 @@ def plotar_matrizes_confusao(rotulos_reais, predicoes, classes, pasta_saida, pre
         normalize="true",
     )
 
-    # Matriz com quantidades absolutas.
+    _salvar_matriz_csv(
+        matriz,
+        classes,
+        pasta_saida / f"matriz_confusao_{prefixo}.csv",
+        lambda valor: str(int(valor)),
+    )
+
+    _salvar_matriz_csv(
+        matriz_normalizada,
+        classes,
+        pasta_saida / f"matriz_confusao_normalizada_{prefixo}.csv",
+        lambda valor: f"{float(valor):.6f}",
+    )
+
     figura, eixo = plt.subplots(figsize=(8, 7))
     ConfusionMatrixDisplay(
         confusion_matrix=matriz,
@@ -308,7 +337,7 @@ def plotar_matrizes_confusao(rotulos_reais, predicoes, classes, pasta_saida, pre
         colorbar=False,
         values_format="d",
     )
-    eixo.set_title("Matriz de confusao - teste")
+    eixo.set_title(f"Matriz de confusao - {titulo}")
     figura.tight_layout()
     figura.savefig(
         pasta_saida / f"matriz_confusao_{prefixo}.png",
@@ -317,7 +346,6 @@ def plotar_matrizes_confusao(rotulos_reais, predicoes, classes, pasta_saida, pre
     )
     plt.close(figura)
 
-    # Matriz normalizada por classe real.
     figura, eixo = plt.subplots(figsize=(8, 7))
     ConfusionMatrixDisplay(
         confusion_matrix=matriz_normalizada,
@@ -327,7 +355,7 @@ def plotar_matrizes_confusao(rotulos_reais, predicoes, classes, pasta_saida, pre
         colorbar=False,
         values_format=".2f",
     )
-    eixo.set_title("Matriz de confusao normalizada - teste")
+    eixo.set_title(f"Matriz de confusao normalizada - {titulo}")
     figura.tight_layout()
     figura.savefig(
         pasta_saida / f"matriz_confusao_normalizada_{prefixo}.png",
@@ -335,3 +363,5 @@ def plotar_matrizes_confusao(rotulos_reais, predicoes, classes, pasta_saida, pre
         bbox_inches="tight",
     )
     plt.close(figura)
+
+    return matriz, matriz_normalizada

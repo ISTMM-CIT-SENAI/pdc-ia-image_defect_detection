@@ -1,0 +1,10 @@
+Modelo: LeNet5
+Origem: Grid Search 2 — experimento 010-M (modelo_melhor.pt)
+
+KERNEL_SIZE = 5
+NEURONIOS_FC1 = 320
+NEURONIOS_FC2 = 224
+LEARNING_RATE = 1e-3
+SEED_TREINO = 42
+OTIMIZADOR = Adam
+FUNCAO_PERDA = CrossEntropyLoss

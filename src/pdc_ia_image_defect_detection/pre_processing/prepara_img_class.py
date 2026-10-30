@@ -11,8 +11,9 @@ Objetivo:
 Base interna:
 - Origem esperada: dataset_atual_crop.
 - Estrutura esperada: material/condicao/imagem.
-- Material, condicao e codigo RAC sao validados pela nomenclatura do projeto.
-- O rotulo final e obtido a partir da condicao validada.
+- O nome MATERIAL_CP_RAC e interpretado por utils.nomenclatura.
+- A coerencia entre nome, pasta de material e pasta de condicao e validada nesta classe.
+- O rotulo final e obtido a partir da pasta de condicao validada.
 - As imagens ja passaram pelo crop do SAM e nao recebem novo crop nesta etapa.
 - O nome final do NPY preserva o stem do arquivo original.
 
@@ -333,31 +334,34 @@ class _PreparadorInterno(_PreparadorBase):
     A entrada ja foi recortada pelo SAM e utiliza a estrutura:
     material/condicao/imagem.
 
-    As regras das pastas pertencem a esta classe porque descrevem a
-    organizacao especifica do dataset interno. O util de nomenclatura conhece
-    somente o nome MATERIAL_CP_RAC e nao depende da estrutura de diretorios.
+    As regras de pastas sao especificas da base interna e permanecem nesta
+    classe, enquanto utils.nomenclatura trata somente MATERIAL_CP_RAC.
     """
 
-    # Relaciona cada pasta de material ao codigo esperado no nome do arquivo.
-    MATERIAIS_POR_PASTA = {
+    # Relaciona cada pasta de material ao codigo usado no nome dos arquivos.
+    PASTAS_MATERIAL = {
         "aco_2500": "A36",
         "Aluminio_2500": "AL",
         "ferro_fundido_4500": "FoFo",
     }
 
-    # Relaciona cada pasta de condicao ao RAC exato esperado no nome.
-    # Ordem RAC: Risco-Amassamento-Corrosao.
-    CONDICOES_POR_PASTA = {
-        "sem_defeito": "000",
-        "risco_leve": "100",
-        "risco_moderado": "200",
-        "risco_severo": "300",
-        "amassamento_leve": "010",
-        "amassamento_moderado": "020",
-        "amassamento_severo": "030",
-        "corrosao_leve": "001",
-        "corrosao_moderado": "002",
-        "corrosao_severo": "003",
+    # Relaciona cada pasta de condicao ao rotulo final e a intensidade esperada
+    # na posicao correspondente do RAC.
+    #
+    # O guia permite combinacoes entre defeitos. Assim, nas pastas de defeito,
+    # somente a posicao do RAC correspondente a pasta e conferida. Os demais
+    # digitos podem possuir outras intensidades validas.
+    CONDICOES = {
+        "sem_defeito": {"rotulo": "sem_falha", "defeito": None, "intensidade": 0},
+        "risco_leve": {"rotulo": "risco", "defeito": "risco", "intensidade": 1},
+        "risco_moderado": {"rotulo": "risco", "defeito": "risco", "intensidade": 2},
+        "risco_severo": {"rotulo": "risco", "defeito": "risco", "intensidade": 3},
+        "amassamento_leve": {"rotulo": "amassamento", "defeito": "amassamento", "intensidade": 1},
+        "amassamento_moderado": {"rotulo": "amassamento", "defeito": "amassamento", "intensidade": 2},
+        "amassamento_severo": {"rotulo": "amassamento", "defeito": "amassamento", "intensidade": 3},
+        "corrosao_leve": {"rotulo": "corrosao", "defeito": "corrosao", "intensidade": 1},
+        "corrosao_moderado": {"rotulo": "corrosao", "defeito": "corrosao", "intensidade": 2},
+        "corrosao_severo": {"rotulo": "corrosao", "defeito": "corrosao", "intensidade": 3},
     }
 
     def __init__(
@@ -458,39 +462,60 @@ class _PreparadorInterno(_PreparadorBase):
             # Extrai os nomes das pastas que definem material e condicao.
             pasta_material, pasta_condicao, _ = relativo.parts
 
-            # Valida a pasta de material segundo a estrutura desta base.
-            if pasta_material not in self.MATERIAIS_POR_PASTA:
+            # A estrutura das pastas de material pertence especificamente a
+            # esta base e nao faz parte das regras genericas de nomenclatura.
+            if pasta_material not in self.PASTAS_MATERIAL:
                 erros.append(
                     (caminho, f"Material desconhecido: {pasta_material}")
                 )
                 continue
 
-            # Valida a pasta de condicao segundo a estrutura desta base.
-            if pasta_condicao not in self.CONDICOES_POR_PASTA:
+            # As pastas de condicao tambem sao uma regra da base interna.
+            if pasta_condicao not in self.CONDICOES:
                 erros.append(
                     (caminho, f"Condicao desconhecida: {pasta_condicao}")
                 )
                 continue
 
             try:
-                # Interpreta somente a nomenclatura generica MATERIAL_CP_RAC.
+                # Interpreta apenas a nomenclatura generica MATERIAL_CP_RAC.
                 dados = interpretar_nome(caminho)
 
-                # Confere se o codigo de material do nome corresponde a pasta.
-                material_esperado = self.MATERIAIS_POR_PASTA[pasta_material]
+                # Confere se MATERIAL no nome corresponde a pasta de material.
+                material_esperado = self.PASTAS_MATERIAL[pasta_material]
+
                 if dados["material"] != material_esperado:
                     raise ValueError(
                         f"Material do nome ({dados['material']}) nao corresponde "
                         f"a pasta {pasta_material} ({material_esperado})."
                     )
 
-                # Confere se o RAC do nome corresponde exatamente a condicao.
-                rac_esperado = self.CONDICOES_POR_PASTA[pasta_condicao]
-                if dados["rac"] != rac_esperado:
-                    raise ValueError(
-                        f"RAC do nome ({dados['rac']}) nao corresponde "
-                        f"a pasta {pasta_condicao} ({rac_esperado})."
-                    )
+                # Recupera a regra especifica da pasta de condicao.
+                regra_condicao = self.CONDICOES[pasta_condicao]
+
+                # sem_defeito exige ausencia total dos tres defeitos.
+                if regra_condicao["defeito"] is None:
+                    if dados["rac"] != "000":
+                        raise ValueError(
+                            f"Condicao '{pasta_condicao}' exige RAC 000, "
+                            f"recebido {dados['rac']}."
+                        )
+                else:
+                    # Para uma pasta de defeito, confere a intensidade apenas na
+                    # posicao correspondente do RAC. Combinacoes continuam validas.
+                    defeito = regra_condicao["defeito"]
+                    intensidade_esperada = regra_condicao["intensidade"]
+                    intensidade_encontrada = dados[defeito]
+
+                    if intensidade_encontrada != intensidade_esperada:
+                        raise ValueError(
+                            f"Condicao '{pasta_condicao}' exige "
+                            f"{defeito}={intensidade_esperada} no RAC, "
+                            f"recebido {dados['rac']}."
+                        )
+
+                # O rotulo final da base interna vem da pasta de condicao.
+                rotulo = regra_condicao["rotulo"]
 
                 # Abre a imagem sem alterar orientacao EXIF para preservar o fluxo
                 # aplicado anteriormente as imagens ja recortadas pelo SAM.
@@ -506,12 +531,12 @@ class _PreparadorInterno(_PreparadorBase):
                 resolucoes[imagem.size] += 1
                 materiais[dados["material"]] += 1
                 condicoes[pasta_condicao] += 1
-                rotulos[dados["rotulo"]] += 1
+                rotulos[rotulo] += 1
 
                 # O registro contem tudo que sera necessario na etapa de gravacao.
                 registro = {
                     "caminho": caminho,
-                    "rotulo": dados["rotulo"],
+                    "rotulo": rotulo,
                     "material": dados["material"],
                     "cp": dados["cp"],
                     "rac": dados["rac"],
@@ -521,7 +546,7 @@ class _PreparadorInterno(_PreparadorBase):
                 }
 
                 self.registros.append(registro)
-                self.esperado_por_rotulo[dados["rotulo"]] += 1
+                self.esperado_por_rotulo[rotulo] += 1
 
             except Exception as erro:
                 erros.append((caminho, str(erro)))

@@ -2,27 +2,19 @@
 treino.py
 
 Objetivo:
-- Configurar e iniciar o treinamento do modelo.
-- Utilizar somente train e val das bases selecionadas.
-- Permitir combinar a base interna e a base externa.
-- Permitir balancear as duas origens por classe quando ambas estiverem ativas.
-- Permitir incluir ou ignorar os arquivos de augmentation ja existentes em train.
-- Manter os parametros ajustaveis neste executavel e a logica em treino_class.py.
-
-Bases:
-- Interna  -> dataset_processado_split/train e val
-- Externa  -> dataset_externo_processado_split/train e val
+- Treinar a arquitetura selecionada usando somente train e val.
+- Configurar separadamente LeNet5 (010-M), VGG16 (035-F) e VGG16 ImageNet.
+- Selecionar bases interna/externa, balanceamento e augmentation existente.
+- Manter a logica de treinamento em pre_processing/treino_class.py.
 
 Regras:
-- Test nao e carregado nem utilizado pelo treinamento.
-- O conjunto test sera usado exclusivamente pelo futuro script de predicao/teste.
-- Augmentation, quando existente, ja esta materializado dentro de train.
-- USAR_AUGMENTATION apenas decide se esses arquivos entram no treino; nao gera augmentation.
-- Se EXECUTAR_TREINO=False, a etapa termina antes de importar PyTorch, modelo ou
-  classe de treinamento.
+- O conjunto test nao participa do treinamento.
+- Augmentation e utilizada somente quando ja existe no diretorio train.
+- Quando desativado, nao importa as dependencias de treinamento.
 """
 
 import sys
+
 sys.dont_write_bytecode = True
 
 
@@ -30,49 +22,80 @@ sys.dont_write_bytecode = True
 # PARAMETROS AJUSTAVEIS
 # =============================================================================
 
-# Ativa ou desativa completamente a etapa de treinamento.
-EXECUTAR_TREINO = False
+EXECUTAR_TREINO = True
+MODELO = "vgg16_imagenet"  # "lenet5", "vgg16" ou "vgg16_imagenet"
 
-# Define quais bases participam do treinamento e da validacao.
 USAR_DATASET_INTERNO = True
-USAR_DATASET_EXTERNO = True
+USAR_DATASET_EXTERNO = False
+BALANCEAR_ORIGENS = False
+USAR_AUGMENTATION = False
 
-# Quando as duas bases estao ativas, iguala a quantidade INTERNA/EXTERNA por
-# classe separadamente em train e val. Se uma origem nao possuir determinada
-# classe, todas as amostras disponiveis da outra origem sao mantidas.
-BALANCEAR_ORIGENS = True
+# LeNet5: configuracao selecionada no Grid Search, experimento 010-M.
+CONFIG_LENET5 = {
+    "kernel_size": 5,
+    "neuronios_fc1": 320,
+    "neuronios_fc2": 224,
+    "learning_rate": 1e-3,
+    "num_epochs": 300,
+    "batch_size": 64,
+    "intervalo_validacao": 5,
+    "paciencia": 10,
+}
 
-# True inclui no train os arquivos gerados pelo augmentation.
-# False usa somente as imagens originais, mesmo que arquivos _augXX.npy existam.
-USAR_AUGMENTATION = True
+# VGG16: configuracao selecionada no Grid Search, experimento 035-F.
+# Os kernels convolucionais (3x3) e de pooling (2x2) sao fixos na arquitetura.
+CONFIG_VGG16 = {
+    "neuronios_fc1": 4096,
+    "neuronios_fc2": 4096,
+    "dropout": 0.5,
+    "learning_rate": 1e-4,
+    "num_epochs": 300,
+    "batch_size": 64,
+    "intervalo_validacao": 5,
+    "paciencia": 3,
+}
 
-# Hiperparametros principais.
-NUM_EPOCHS = 100
-BATCH_SIZE = 32
-LEARNING_RATE = 1e-3
-INTERVALO_VALIDACAO = 5
+# VGG16 ImageNet: arquitetura oficial, saida para 4 classes e pesos pre-treinados.
+# Dados esperados: NPY grayscale float32, 224x224 e valores em [0,1].
+# A duplicacao dos canais e a normalizacao ImageNet ocorrem dentro do modelo.
+# Modo completo atualiza todos os pesos; parcial atualiza o ultimo bloco e FCs;
+# classificador atualiza somente a camada final de saida.
+CONFIG_VGG16_IMAGENET = {
+    "modo_fine_tuning": "completo",
+    "learning_rate": 1e-5,
+    "num_epochs": 300,
+    "batch_size": 64,
+    "intervalo_validacao": 5,
+    "paciencia": 3,
+}
+
 SEED_TREINO = 42
-
-# Configuracao do DataLoader. Zero e a opcao mais segura no Windows.
 NUM_WORKERS = 0
-
-# Usa CUDA quando disponivel. False forca CPU.
 USAR_CUDA = True
 
 
 def executar():
-    """Executa o treinamento somente quando a etapa estiver ativada."""
-
+    """Configura e executa o treinamento da arquitetura selecionada."""
     if not EXECUTAR_TREINO:
         print("\nTREINO desativado: EXECUTAR_TREINO=False.")
         return {}
 
-    # Imports pesados e internos ocorrem somente quando o treino sera executado.
+    nome_modelo = MODELO.strip().lower()
+    configuracoes = {
+        "lenet5": (CONFIG_LENET5, ("kernel_size", "neuronios_fc1", "neuronios_fc2")),
+        "vgg16": (CONFIG_VGG16, ("neuronios_fc1", "neuronios_fc2", "dropout")),
+        "vgg16_imagenet": (CONFIG_VGG16_IMAGENET, ("modo_fine_tuning",)),
+    }
+    if nome_modelo not in configuracoes:
+        raise ValueError(f"Modelo nao suportado: {MODELO!r}. Use 'lenet5', 'vgg16' ou 'vgg16_imagenet'.")
+
+    config, nomes_parametros = configuracoes[nome_modelo]
+    parametros_modelo = {nome: config[nome] for nome in nomes_parametros}
+
     from pdc_ia_image_defect_detection.pre_processing.treino_class import TreinoProcessor
     from pdc_ia_image_defect_detection.utils.paths import encontrar_raiz_projeto
 
     base_dir = encontrar_raiz_projeto(__file__)
-
     bases = {
         "INTERNA": {
             "ativa": USAR_DATASET_INTERNO,
@@ -86,18 +109,24 @@ def executar():
         },
     }
 
+    print(f"\nModelo selecionado: {nome_modelo}")
+    print(f"Parametros da arquitetura: {parametros_modelo}")
+
     return TreinoProcessor(
+        nome_modelo=nome_modelo,
         bases=bases,
         pasta_resultados=base_dir / "resultados" / "resultados_treino",
-        num_epochs=NUM_EPOCHS,
-        batch_size=BATCH_SIZE,
-        learning_rate=LEARNING_RATE,
-        intervalo_validacao=INTERVALO_VALIDACAO,
+        num_epochs=config["num_epochs"],
+        batch_size=config["batch_size"],
+        learning_rate=config["learning_rate"],
+        intervalo_validacao=config["intervalo_validacao"],
+        paciencia=config["paciencia"],
         seed=SEED_TREINO,
         num_workers=NUM_WORKERS,
         usar_cuda=USAR_CUDA,
         balancear_origens=BALANCEAR_ORIGENS,
         usar_augmentation=USAR_AUGMENTATION,
+        parametros_modelo=parametros_modelo,
     ).executar()
 
 

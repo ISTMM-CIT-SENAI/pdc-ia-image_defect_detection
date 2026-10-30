@@ -52,7 +52,7 @@ sys.dont_write_bytecode = True
 # =============================================================================
 
 # Ativa ou desativa completamente a etapa de teste.
-EXECUTAR_TEST = True
+EXECUTAR_TEST = False
 
 # True usa os conjuntos test gerados pelo split.
 # False usa somente PASTA_TESTE_ESCOLHIDA.
@@ -60,7 +60,7 @@ USAR_TEST_SPLIT = True
 
 # Usados somente quando USAR_TEST_SPLIT=True.
 USAR_DATASET_INTERNO = True
-USAR_DATASET_EXTERNO = True
+USAR_DATASET_EXTERNO = False
 
 # Pasta usada somente quando USAR_TEST_SPLIT=False.
 # Deve conter uma subpasta por classe com as imagens de teste.
@@ -76,14 +76,14 @@ EXTENSOES_IMAGEM = (".png", ".jpg", ".jpeg", ".bmp")
 PASTA_TREINO = (
     Path("resultados")
     / "resultados_treino"
-    / "treino_lenet5_inicio_2026-10-19_11-17-37"
+    / "treino_vgg16_r256_int_inicio_2026-10-29_13-49-58_fim_2026-10-29_13-51-46"
 )
 
 # True usa modelo_melhor.pt. False usa modelo_final.pt.
-USAR_MODELO_MELHOR = True
+USAR_MODELO_MELHOR = False
 
 # Parametros de avaliacao.
-BATCH_SIZE = 32
+BATCH_SIZE = 64
 NUM_WORKERS = 0
 USAR_CUDA = True
 SEED_TEST = 42

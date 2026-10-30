@@ -71,7 +71,7 @@ PREPARAR_DATASET_INTERNO = True
 PREPARAR_DATASET_EXTERNO = True
 
 # Define a resolucao final comum as duas bases no formato (largura, altura).
-TAMANHO_FINAL = (256, 256)
+TAMANHO_FINAL = (224, 224)
 
 # Define os formatos de imagem aceitos nas bases de entrada.
 EXTENSOES_VALIDAS = (

@@ -17,7 +17,7 @@ Regras:
   inferencia usando crop quadrado central, grayscale, resize LANCZOS, float32
   e normalizacao para [0,1].
 - Test nunca recebe augmentation em runtime.
-- O modelo e importado exclusivamente de models/lenet5.py.
+- O modelo e recriado por models/modelos.py usando model_name do checkpoint.
 - As classes sao conferidas contra o checkpoint.
 - Pastas de classe ausentes sao permitidas, mas pastas desconhecidas geram erro.
 - O conjunto test pode conter zero imagens em alguma classe.
@@ -41,7 +41,11 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset
 
-from pdc_ia_image_defect_detection.models.lenet5 import LeNet5
+from pdc_ia_image_defect_detection.models.modelos import (
+    criar_modelo,
+    modelos_disponiveis,
+    normalizar_nome_modelo,
+)
 from pdc_ia_image_defect_detection.utils.metrics import (
     calcular_metricas_classificacao,
     plotar_matrizes_confusao,
@@ -55,6 +59,10 @@ from pdc_ia_image_defect_detection.utils.imagens import (
 )
 from pdc_ia_image_defect_detection.utils.npy import carregar_imagem_npy
 from pdc_ia_image_defect_detection.utils.nomenclatura import ROTULOS
+from pdc_ia_image_defect_detection.utils.resultados import (
+    criar_pasta_resultados,
+    finalizar_pasta_resultados,
+)
 
 
 class _DatasetTeste(Dataset):
@@ -241,6 +249,7 @@ class TestProcessor:
         self.pasta_execucao = None
         self.inicio = None
         self.estatisticas_pasta_manual = {}
+        self.nome_modelo = None
 
     # =========================================================================
     # VALIDACAO E SELECAO DOS DADOS
@@ -392,6 +401,19 @@ class TestProcessor:
 
         self.classes = list(self.checkpoint["classes"])
         self.input_shape = tuple(int(valor) for valor in self.checkpoint["input_shape"])
+        # Checkpoints novos registram o identificador exato do modelo.
+        # Para checkpoints antigos sem model_name, assume lenet5.
+        self.nome_modelo = normalizar_nome_modelo(
+            self.checkpoint.get("model_name", "lenet5")
+        )
+        self.parametros_modelo = dict(self.checkpoint.get("config_modelo") or {})
+
+        if self.nome_modelo not in modelos_disponiveis():
+            disponiveis = ", ".join(modelos_disponiveis())
+            raise ValueError(
+                f"Modelo do checkpoint desconhecido: '{self.nome_modelo}'. "
+                f"Disponiveis: {disponiveis}."
+            )
 
         if not self.classes:
             raise ValueError("Checkpoint nao possui classes.")
@@ -650,14 +672,16 @@ class TestProcessor:
     # =========================================================================
 
     def _inicializar_modelo(self):
-        """Cria a LeNet5, materializa LazyLinear e carrega os pesos."""
+        """Recria a arquitetura registrada no checkpoint e carrega os pesos."""
 
-        self.modelo = LeNet5(
-            num_classes=len(self.classes)
+        self.modelo = criar_modelo(
+            self.nome_modelo,
+            num_classes=len(self.classes),
+            **self.parametros_modelo,
         ).to(self.device)
 
-        # O forward com tensor vazio materializa os parametros da LazyLinear
-        # usando exatamente a dimensao registrada pelo treinamento.
+        # O primeiro forward materializa eventuais camadas Lazy* usando
+        # exatamente a dimensao registrada durante o treinamento.
         exemplo = torch.zeros(
             (1, *self.input_shape),
             dtype=torch.float32,
@@ -669,7 +693,8 @@ class TestProcessor:
 
         if tuple(saida.shape) != (1, len(self.classes)):
             raise RuntimeError(
-                f"Saida inesperada do modelo: {tuple(saida.shape)}"
+                f"Saida inesperada do modelo '{self.nome_modelo}': "
+                f"{tuple(saida.shape)}. Esperado (1,{len(self.classes)})."
             )
 
         try:
@@ -678,7 +703,8 @@ class TestProcessor:
             )
         except RuntimeError as erro:
             raise RuntimeError(
-                "O checkpoint nao e compativel com models/lenet5.py atual."
+                f"O checkpoint nao e compativel com o modelo "
+                f"'{self.nome_modelo}' registrado no projeto."
             ) from erro
 
         self.modelo.eval()
@@ -790,20 +816,33 @@ class TestProcessor:
     # RESULTADOS E RELATORIOS
     # =========================================================================
 
-    def _criar_pasta_resultados(self):
-        """Cria uma pasta temporaria desta execucao antes de gerar resultados."""
+    def _detalhes_nome_resultado(self):
+        """Retorna nome do modelo e resolucao usados no teste."""
 
-        self.inicio = datetime.now()
-        modo = "split" if self.usar_test_split else "pasta"
+        altura, largura = self.input_shape[1], self.input_shape[2]
+        resolucao = f"r{altura}" if altura == largura else f"r{largura}x{altura}"
+        return (self.nome_modelo, resolucao)
 
-        self.pasta_execucao = (
-            self.pasta_resultados
-            / f"test_{modo}_inicio_{self.inicio:%Y-%m-%d_%H-%M-%S}_em_andamento"
+    def _indicadores_nome_resultado(self):
+        """Retorna as flags True que devem aparecer no nome da pasta."""
+
+        return (
+            ("split", self.usar_test_split),
+            ("int", self.usar_test_split and "INTERNA" in self.bases_split_ativas),
+            ("ext", self.usar_test_split and "EXTERNA" in self.bases_split_ativas),
+            ("melhor", self.usar_modelo_melhor),
         )
 
-        self.pasta_execucao.mkdir(
-            parents=True,
-            exist_ok=False,
+    def _criar_pasta_resultados(self):
+        """Cria a pasta padronizada desta execucao em estado em_andamento."""
+
+        self.inicio = datetime.now()
+        self.pasta_execucao = criar_pasta_resultados(
+            raiz=self.pasta_resultados,
+            tipo="test",
+            inicio=self.inicio,
+            detalhes=self._detalhes_nome_resultado(),
+            indicadores=self._indicadores_nome_resultado(),
         )
 
     def _contagens_teste(self):
@@ -1126,7 +1165,7 @@ class TestProcessor:
             f"Pasta do treino: {self.pasta_treino}",
             f"Checkpoint: {self.caminho_modelo}",
             f"Checkpoint escolhido: {'melhor' if self.usar_modelo_melhor else 'final'}",
-            f"Model name: {self.checkpoint.get('model_name', 'nao informado')}",
+            f"Model name: {self.nome_modelo}",
             f"Epoca do checkpoint: {self.checkpoint.get('epoca', 'nao informado')}",
             f"Input shape: {self.input_shape}",
             f"Classes: {', '.join(self.classes)}",
@@ -1420,22 +1459,16 @@ class TestProcessor:
             print(f"  {origem:<15}: {por_origem[origem]}")
 
     def _finalizar_pasta(self, fim):
-        """Renomeia a pasta temporaria para registrar inicio e fim da execucao."""
+        """Renomeia a pasta de teste incluindo o horario final."""
 
-        modo = "split" if self.usar_test_split else "pasta"
-        pasta_final = (
-            self.pasta_resultados
-            / f"test_{modo}_inicio_{self.inicio:%Y-%m-%d_%H-%M-%S}"
-              f"_fim_{fim:%Y-%m-%d_%H-%M-%S}"
+        self.pasta_execucao = finalizar_pasta_resultados(
+            pasta_atual=self.pasta_execucao,
+            tipo="test",
+            inicio=self.inicio,
+            fim=fim,
+            detalhes=self._detalhes_nome_resultado(),
+            indicadores=self._indicadores_nome_resultado(),
         )
-
-        if pasta_final.exists():
-            raise FileExistsError(
-                f"Pasta final de resultados ja existe: {pasta_final}"
-            )
-
-        self.pasta_execucao.rename(pasta_final)
-        self.pasta_execucao = pasta_final
 
     # =========================================================================
     # FLUXO PRINCIPAL

@@ -13,7 +13,9 @@ Ordem atual:
 3. SPLIT
 4. AUGMENTATION
 5. TREINO
-6. TEST
+6. GRID_SEARCH
+7. GRID_TEST
+8. TEST
 
 Observacoes:
 - O treinamento utiliza somente train e val.
@@ -37,6 +39,8 @@ ETAPAS = (
     ("SPLIT", "pdc_ia_image_defect_detection.processing.split"),
     ("AUGMENTATION", "pdc_ia_image_defect_detection.processing.augmentation"),
     ("TREINO", "pdc_ia_image_defect_detection.processing.treino"),
+    ("GRID_SEARCH", "pdc_ia_image_defect_detection.processing.grid_search"),
+    ("GRID_TEST", "pdc_ia_image_defect_detection.processing.grid_test"),
     ("TEST", "pdc_ia_image_defect_detection.processing.test"),
 )
 

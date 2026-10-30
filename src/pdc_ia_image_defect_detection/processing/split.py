@@ -62,13 +62,13 @@ DIVIDIR_DATASET_INTERNO = True
 DIVIDIR_DATASET_EXTERNO = True
 
 # Proporcao destinada ao conjunto de treinamento.
-PROPORCAO_TREINO = 0.70
+PROPORCAO_TREINO = 0.60
 
 # Proporcao destinada ao conjunto de validacao.
-PROPORCAO_VALIDACAO = 0.15
+PROPORCAO_VALIDACAO = 0.20
 
 # Proporcao destinada ao conjunto de teste.
-PROPORCAO_TESTE = 0.15
+PROPORCAO_TESTE = 0.20
 
 # Define a seed usada no embaralhamento das imagens.
 SEED_SPLIT = 42

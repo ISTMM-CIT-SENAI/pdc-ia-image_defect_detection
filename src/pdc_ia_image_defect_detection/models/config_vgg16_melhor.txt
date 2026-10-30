@@ -1,0 +1,80 @@
+VGG16 - CONFIGURACOES SELECIONADAS (GRID SEARCH 2)
+================================================
+
+MODELO: vgg16 (treinado do zero; nao e a VGG16 ImageNet)
+ORIGEM: Grid Search VGG16 de 29/10/2026, 36 experimentos
+KERNEL_CONVOLUCIONAL = 3
+MAXPOOL_KERNEL = 2
+MAXPOOL_STRIDE = 2
+SEED_TREINO = 42
+OTIMIZADOR = Adam
+FUNCAO_PERDA = CrossEntropyLoss
+
+
+1) MELHOR CONFIGURACAO - EXPERIMENTO 035-F
+-----------------------------------------
+CHECKPOINT = modelo_final.pt
+NEURONIOS_FC1 = 4096
+NEURONIOS_FC2 = 4096
+LEARNING_RATE = 1e-4
+DROPOUT = 0.5
+
+RESULTADOS DE VALIDACAO (CSV DO GRID SEARCH):
+EPOCAS_EXECUTADAS = 75
+MELHOR_EPOCA_POR_VAL_LOSS = 50
+MENOR_VAL_LOSS = 0.259706
+MAIOR_VAL_ACCURACY = 96.00% (epoca 75)
+VAL_ACCURACY_FINAL = 96.00%
+VAL_LOSS_FINAL = 0.423092
+F1_MACRO_VAL_FINAL = 0.959600
+
+RESULTADOS DE TESTE (GRAFICOS DO GRID TEST):
+TEST_ACCURACY = 97.33% (73/75)
+TEST_LOSS = aproximadamente 0.060
+ACERTOS_AMASSAMENTO = 12/12
+ACERTOS_CORROSAO = 17/18
+ACERTOS_RISCO = 18/18
+ACERTOS_SEM_FALHA = 26/27
+
+JUSTIFICATIVA: desempenho elevado e consistente em validacao e teste,
+menor loss de teste entre os checkpoints mostrados e poucas epocas.
+Preferido como referencia principal da VGG16 treinada do zero.
+
+
+2) SEGUNDA MELHOR CONFIGURACAO - EXPERIMENTO 010-F
+-------------------------------------------------
+CHECKPOINT = modelo_final.pt
+NEURONIOS_FC1 = 1024
+NEURONIOS_FC2 = 717
+LEARNING_RATE = 1e-5
+DROPOUT = 0.3
+
+RESULTADOS DE VALIDACAO (CSV DO GRID SEARCH):
+EPOCAS_EXECUTADAS = 165
+MELHOR_EPOCA_POR_VAL_LOSS = 140
+MENOR_VAL_LOSS = 0.360519
+MAIOR_VAL_ACCURACY = 88.00% (epoca 165)
+VAL_ACCURACY_FINAL = 88.00%
+VAL_LOSS_FINAL = 0.415800
+F1_MACRO_VAL_FINAL = 0.842064
+
+RESULTADOS DE TESTE (GRAFICOS DO GRID TEST):
+TEST_ACCURACY = 98.67% (74/75)
+TEST_LOSS = aproximadamente 0.087
+ACERTOS_AMASSAMENTO = 11/12
+ACERTOS_CORROSAO = 18/18
+ACERTOS_RISCO = 18/18
+ACERTOS_SEM_FALHA = 27/27
+
+JUSTIFICATIVA: maior acuracia no teste (uma imagem a mais que 035-F),
+classificador menor e menos parametros. Mantido como alternativa.
+
+
+OBSERVACOES
+-----------
+- O sufixo F indica o checkpoint final; M indica o checkpoint de menor val_loss.
+- A menor val_loss informada em cada treino pode ser de uma epoca anterior
+  e NAO corresponde necessariamente ao checkpoint F selecionado.
+- As test losses sao aproximacoes lidas dos graficos, nao do CSV de teste.
+- A escolha da 035-F e baseada no conjunto de indicadores; a diferenca
+  de uma imagem no teste nao comprova superioridade de generalizacao.

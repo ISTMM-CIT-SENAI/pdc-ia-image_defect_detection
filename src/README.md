@@ -196,3 +196,29 @@ python src/main.py
 ```
 
 O `main.py` executará somente as etapas ativadas, respeitando a ordem do pipeline.
+
+# Padrao de pastas de resultados
+
+Toda etapa que criar uma pasta de resultados deve usar `utils/resultados.py`.
+
+O nome registra:
+
+```text
+tipo + modelo + resolucao + indicadores True + inicio + fim
+```
+
+Somente flags ativas recebem indicador no nome. Flags `False` nao geram texto.
+
+Exemplos:
+
+```text
+treino_lenet5_r256_int_aug_inicio_2026-10-23_12-47-03_fim_2026-10-23_13-05-11
+test_lenet5_r256_split_int_melhor_inicio_2026-10-23_13-10-00_fim_2026-10-23_13-11-24
+```
+
+Indicadores atuais:
+
+- treino: `int`, `ext`, `aug`, `bal`;
+- test: `split`, `int`, `ext`, `melhor`.
+
+Enquanto uma execucao ainda nao terminou, a pasta termina em `_em_andamento`. Ao final, ela e renomeada e recebe o horario de fim.

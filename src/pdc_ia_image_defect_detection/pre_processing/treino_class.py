@@ -7,7 +7,8 @@ Objetivo:
 - Combinar as origens sem utilizar o conjunto test.
 - Aplicar balanceamento opcional INTERNA/EXTERNA por classe.
 - Criar DataLoaders, modelo, loss e otimizador.
-- Treinar a LeNet5 e validar em intervalos configuraveis.
+- Treinar o modelo selecionado e validar em intervalos configuraveis.
+- Aplicar early stopping por paciencia medida em eventos de validacao.
 - Salvar melhor checkpoint, checkpoint final, historico e informacoes da execucao.
 
 Regras importantes:
@@ -16,7 +17,7 @@ Regras importantes:
 - Augmentation ja foi materializado anteriormente no diretorio train.
 - A flag usar_augmentation decide se arquivos _augXX.npy entram no train.
 - Val nunca depende dessa flag e deve permanecer sem augmentation.
-- O modelo e importado exclusivamente de models/lenet5.py.
+- O modelo e criado exclusivamente por models/modelos.py.
 - A ordem das classes vem de utils.nomenclatura.ROTULOS.
 - O carregamento das imagens e reutilizavel e fica em utils.dataset.
 - Historico e grafico ficam em utils.metrics.
@@ -31,6 +32,10 @@ Balanceamento de origens:
 """
 
 from collections import Counter, defaultdict
+import csv
+import hashlib
+import os
+import shutil
 from datetime import datetime
 from pathlib import Path
 import math
@@ -43,11 +48,22 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 
-from pdc_ia_image_defect_detection.models.lenet5 import LeNet5
+from pdc_ia_image_defect_detection.models.modelos import (
+    criar_modelo,
+    modelos_disponiveis,
+    normalizar_nome_modelo,
+)
 from pdc_ia_image_defect_detection.utils.dataset import DatasetNPY
 from pdc_ia_image_defect_detection.utils.metrics import (
+    calcular_metricas_classificacao,
     plotar_historico,
+    plotar_matrizes_confusao,
     salvar_historico_csv,
+    salvar_metricas_classificacao,
+)
+from pdc_ia_image_defect_detection.utils.resultados import (
+    criar_pasta_resultados,
+    finalizar_pasta_resultados,
 )
 from pdc_ia_image_defect_detection.utils.nomenclatura import ROTULOS
 
@@ -61,31 +77,49 @@ class TreinoProcessor:
 
     def __init__(
         self,
+        nome_modelo,
         bases,
         pasta_resultados,
         num_epochs,
         batch_size,
         learning_rate,
         intervalo_validacao,
+        paciencia,
         seed,
         num_workers,
         usar_cuda,
         balancear_origens,
         usar_augmentation,
+        parametros_modelo=None,
+        detalhes_resultado=(),
+        salvar_historico_incremental=False,
+        continuar_de=None,
+        nome_curto_grid=False,
     ):
         """Armazena toda a configuracao recebida do processing/treino.py."""
 
+        self.nome_modelo = normalizar_nome_modelo(nome_modelo)
         self.bases = dict(bases)
         self.pasta_resultados = Path(pasta_resultados)
         self.num_epochs = int(num_epochs)
         self.batch_size = int(batch_size)
         self.learning_rate = float(learning_rate)
         self.intervalo_validacao = int(intervalo_validacao)
+        self.paciencia = None if paciencia is None else int(paciencia)
         self.seed = int(seed)
         self.num_workers = int(num_workers)
         self.usar_cuda = bool(usar_cuda)
         self.balancear_origens = bool(balancear_origens)
         self.usar_augmentation = bool(usar_augmentation)
+        self.parametros_modelo = dict(parametros_modelo or {})
+        self.detalhes_resultado = tuple(detalhes_resultado)
+        self.nome_curto_grid = bool(nome_curto_grid)
+        self.salvar_historico_incremental = bool(salvar_historico_incremental)
+        self.continuar_de = None if continuar_de is None else Path(continuar_de)
+        self.estado_otimizador_retomado = "nao_se_aplica"
+        self.epocas_origem = 0
+        self.gerador_train = None
+        self.otimizador = None
 
         # A ordem fixa evita divergencia de indices entre treino e predicao.
         self.classes = tuple(ROTULOS)
@@ -104,7 +138,11 @@ class TreinoProcessor:
         self.historico = []
         self.melhor_val_loss = math.inf
         self.melhor_epoca = None
+        self.validacoes_sem_melhoria = 0
+        self.interrompido_por_paciencia = False
+        self.epocas_executadas = 0
         self.input_shape = None
+        self.assinatura_dados = None
 
     def _validar_parametros(self):
         """Valida hiperparametros e caminhos sem modificar arquivos."""
@@ -121,8 +159,18 @@ class TreinoProcessor:
         if self.intervalo_validacao <= 0:
             raise ValueError("INTERVALO_VALIDACAO deve ser maior que zero.")
 
+        if self.paciencia is not None and self.paciencia <= 0:
+            raise ValueError("PACIENCIA deve ser maior que zero ou None.")
+
         if self.num_workers < 0:
             raise ValueError("NUM_WORKERS nao pode ser negativo.")
+
+        if self.nome_modelo not in modelos_disponiveis():
+            disponiveis = ", ".join(modelos_disponiveis())
+            raise ValueError(
+                f"MODELO desconhecido: '{self.nome_modelo}'. "
+                f"Disponiveis: {disponiveis}."
+            )
 
         # Mantem somente as bases explicitamente ativadas no processing.
         self.bases_ativas = {
@@ -327,6 +375,10 @@ class TreinoProcessor:
         print(f"Batch size            : {self.batch_size}")
         print(f"Learning rate         : {self.learning_rate}")
         print(f"Intervalo validacao   : {self.intervalo_validacao}")
+        print(
+            f"Paciencia validacoes  : "
+            f"{self.paciencia if self.paciencia is not None else 'desativada'}"
+        )
         print(f"Seed                   : {self.seed}")
         print("Conjunto test         : NAO UTILIZADO")
 
@@ -352,20 +404,53 @@ class TreinoProcessor:
                 )
                 print(f"  {rotulo:<15}: {por_classe[rotulo]:>5} | {detalhes}")
 
-    def _criar_pasta_resultados(self):
-        """Cria uma pasta unica para os arquivos desta execucao."""
+    def _detalhes_nome_resultado(self):
+        """Retorna detalhes permanentes usados no nome da pasta de treino."""
 
-        agora = datetime.now()
-        marca = agora.strftime("%Y-%m-%d_%H-%M-%S")
+        if self.nome_curto_grid:
+            # O Grid registra modelo, resolucao e flags no JSON/CSV da rodada.
+            # Nome curto evita caminhos superiores ao limite comum do Windows.
+            return self.detalhes_resultado
 
-        # A resolucao sera acrescentada ao resumo depois do primeiro lote.
-        nome = f"treino_lenet5_inicio_{marca}"
+        altura, largura = self.input_shape[1], self.input_shape[2]
+        resolucao = f"r{altura}" if altura == largura else f"r{largura}x{altura}"
+        return (self.nome_modelo, resolucao, *self.detalhes_resultado)
 
-        self.pasta_resultados.mkdir(parents=True, exist_ok=True)
-        self.pasta_execucao = self.pasta_resultados / nome
-        self.pasta_execucao.mkdir(parents=False, exist_ok=False)
+    def _indicadores_nome_resultado(self):
+        """Retorna somente flags de experimento que podem aparecer no nome."""
 
-        return agora
+        if self.nome_curto_grid:
+            return ()
+
+        return (
+            ("int", "INTERNA" in self.bases_ativas),
+            ("ext", "EXTERNA" in self.bases_ativas),
+            ("aug", self.usar_augmentation),
+            ("bal", self.balancear_origens),
+        )
+
+    def _criar_pasta_resultados(self, inicio):
+        """Cria a pasta padronizada desta execucao em estado em_andamento."""
+
+        self.pasta_execucao = criar_pasta_resultados(
+            raiz=self.pasta_resultados,
+            tipo="treino",
+            inicio=inicio,
+            detalhes=self._detalhes_nome_resultado(),
+            indicadores=self._indicadores_nome_resultado(),
+        )
+
+    def _finalizar_pasta_resultados(self, inicio, fim):
+        """Renomeia a pasta de treino incluindo o horario final."""
+
+        self.pasta_execucao = finalizar_pasta_resultados(
+            pasta_atual=self.pasta_execucao,
+            tipo="treino",
+            inicio=inicio,
+            fim=fim,
+            detalhes=self._detalhes_nome_resultado(),
+            indicadores=self._indicadores_nome_resultado(),
+        )
 
     def _criar_loaders(self):
         """Cria DatasetNPY e DataLoader para train e val."""
@@ -376,6 +461,7 @@ class TreinoProcessor:
         # Generator dedicado torna o shuffle de train reproduzivel.
         generator = torch.Generator()
         generator.manual_seed(self.seed)
+        self.gerador_train = generator
 
         usar_pin_memory = self.device.type == "cuda"
 
@@ -417,11 +503,20 @@ class TreinoProcessor:
             print("CUDA solicitada, mas indisponivel. Treino sera executado em CPU.")
 
     def _inicializar_modelo(self, train_loader):
-        """
-        Cria LeNet5 e inicializa LazyLinear com um lote real antes do otimizador.
-        """
+        """Cria o modelo selecionado e valida sua interface com um lote real."""
 
-        self.modelo = LeNet5(num_classes=len(self.classes)).to(self.device)
+        # ImageNet e carregado apenas ao iniciar um novo treino da VGG16.
+        # Continuacoes e testes devem restaurar somente os pesos do checkpoint.
+        parametros_iniciais = {}
+        if self.nome_modelo == "vgg16_imagenet":
+            parametros_iniciais["carregar_pesos_imagenet"] = self.continuar_de is None
+
+        self.modelo = criar_modelo(
+            self.nome_modelo,
+            num_classes=len(self.classes),
+            **self.parametros_modelo,
+            **parametros_iniciais,
+        ).to(self.device)
 
         imagens, _ = next(iter(train_loader))
         imagens = imagens.to(self.device, non_blocking=self.device.type == "cuda")
@@ -429,19 +524,30 @@ class TreinoProcessor:
         # Registra a geometria efetiva usada pelo treinamento.
         self.input_shape = tuple(int(valor) for valor in imagens.shape[1:])
 
-        # O primeiro forward materializa os parametros de nn.LazyLinear.
+        # O primeiro forward tambem materializa eventuais camadas Lazy*.
         with torch.no_grad():
             saida = self.modelo(imagens[:1])
 
         if saida.shape != (1, len(self.classes)):
             raise RuntimeError(
-                f"Saida inesperada do modelo: {tuple(saida.shape)}. "
-                f"Esperado (1,{len(self.classes)})."
+                f"Saida inesperada do modelo '{self.nome_modelo}': "
+                f"{tuple(saida.shape)}. Esperado (1,{len(self.classes)})."
             )
 
+        # Procura a primeira camada Linear apenas para informar sua entrada.
+        primeira_linear = next(
+            (modulo for modulo in self.modelo.modules() if isinstance(modulo, nn.Linear)),
+            None,
+        )
+
+        print(f"Modelo                 : {self.nome_modelo}")
+        print(f"Classe do modelo       : {self.modelo.__class__.__name__}")
+        print(f"Parametros modelo      : {self.parametros_modelo}")
         print(f"Entrada do modelo      : {self.input_shape}")
         print(f"Classes de saida       : {len(self.classes)}")
-        print(f"LazyLinear in_features : {self.modelo.classifier[1].in_features}")
+
+        if primeira_linear is not None:
+            print(f"Primeira Linear        : in_features={primeira_linear.in_features}")
 
     def _treinar_epoca(self, loader, criterio, otimizador):
         """Executa uma epoca completa com atualizacao dos pesos."""
@@ -511,34 +617,251 @@ class TreinoProcessor:
 
         return perda_acumulada / total, acertos / total
 
+    def _obter_predicoes(self, loader):
+        """Retorna rotulos reais e previsoes de um DataLoader sem alterar pesos."""
+
+        self.modelo.eval()
+        rotulos_reais = []
+        predicoes = []
+
+        with torch.no_grad():
+            for imagens, rotulos in loader:
+                imagens = imagens.to(
+                    self.device,
+                    non_blocking=self.device.type == "cuda",
+                )
+                saidas = self.modelo(imagens)
+
+                rotulos_reais.extend(rotulos.cpu().tolist())
+                predicoes.extend(saidas.argmax(dim=1).cpu().tolist())
+
+        return rotulos_reais, predicoes
+
+    def _salvar_metricas_finais(self, train_loader, val_loader, criterio):
+        """Salva metricas e matrizes do modelo final em train e val."""
+
+        resumo = {}
+
+        for nome, loader in (("treino_final", train_loader), ("validacao_final", val_loader)):
+            loss, _ = self._avaliar(loader, criterio)
+            reais, previstos = self._obter_predicoes(loader)
+            metricas, relatorio = calcular_metricas_classificacao(
+                reais,
+                previstos,
+                self.classes,
+            )
+
+            salvar_metricas_classificacao(
+                metricas,
+                relatorio,
+                loss,
+                self.pasta_execucao / f"metricas_{nome}.txt",
+                titulo=nome.replace("_", " ").upper(),
+            )
+
+            plotar_matrizes_confusao(
+                reais,
+                previstos,
+                self.classes,
+                self.pasta_execucao,
+                prefixo=nome,
+            )
+
+            resumo[nome] = {
+                "loss": float(loss),
+                **{chave: float(valor) for chave, valor in metricas.items()},
+            }
+
+        return resumo
+
+    def _assinar_amostras(self):
+        """Identifica arquivos efetivamente usados em train e val."""
+        resumo = hashlib.sha256()
+        for particao, amostras in (("train", self.amostras_train),
+                                   ("val", self.amostras_val)):
+            for item in amostras:
+                caminho = Path(item["caminho"]).resolve()
+                dados = caminho.stat()
+                registro = (particao, str(caminho), item["rotulo"],
+                            str(dados.st_size), str(dados.st_mtime_ns))
+                resumo.update("|".join(registro).encode("utf-8"))
+                resumo.update(b"\n")
+        return resumo.hexdigest()
+
+    def _capturar_rng(self):
+        """Registra RNGs para continuacoes mais reprodutiveis."""
+        estado_numpy = np.random.get_state()
+        return {
+            "python": random.getstate(),
+            "numpy": (estado_numpy[0], estado_numpy[1].tolist(),
+                      int(estado_numpy[2]), int(estado_numpy[3]),
+                      float(estado_numpy[4])),
+            "torch": torch.get_rng_state(),
+            "cuda": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
+            "data_loader": self.gerador_train.get_state() if self.gerador_train else None,
+        }
+
+    def _restaurar_rng(self, estado):
+        """Restaura RNGs disponiveis; checkpoints antigos podem nao possui-los."""
+        if not estado:
+            return
+        random.setstate(estado["python"])
+        n = estado["numpy"]
+        np.random.set_state((n[0], np.asarray(n[1], dtype=np.uint32), n[2], n[3], n[4]))
+        torch.set_rng_state(estado["torch"].cpu())
+        if self.device.type == "cuda" and estado.get("cuda"):
+            torch.cuda.set_rng_state_all([item.cpu() for item in estado["cuda"]])
+        if estado.get("data_loader") is not None:
+            self.gerador_train.set_state(estado["data_loader"].cpu())
+
+    def _carregar_continuacao(self):
+        """Recupera pesos finais, historico, paciencia e estado do Adam, se disponivel."""
+        origem = self.continuar_de
+        if not origem or not origem.is_dir():
+            raise FileNotFoundError(f"Pasta de origem invalida: {origem}")
+        caminho_final = origem / "modelo_final.pt"
+        caminho_melhor = origem / "modelo_melhor.pt"
+        caminho_historico = origem / "historico_treinamento.csv"
+        for caminho in (caminho_final, caminho_melhor, caminho_historico):
+            if not caminho.is_file():
+                raise FileNotFoundError(f"Arquivo de continuacao ausente: {caminho}")
+
+        # Somente checkpoints locais e confiaveis do proprio projeto.
+        checkpoint = torch.load(caminho_final, map_location="cpu", weights_only=False)
+        if str(checkpoint.get("model_name", "lenet5")).lower() != self.nome_modelo:
+            raise ValueError("Modelo da continuacao diferente do configurado.")
+        if dict(checkpoint.get("config_modelo") or {}) != self.parametros_modelo:
+            raise ValueError("Parametros da arquitetura divergentes do checkpoint.")
+        if tuple(checkpoint["input_shape"]) != self.input_shape:
+            raise ValueError("Dimensoes de entrada divergentes da origem.")
+        if list(checkpoint["classes"]) != list(self.classes):
+            raise ValueError("Classes divergentes da origem.")
+        if checkpoint.get("assinatura_dados") != self.assinatura_dados:
+            raise ValueError("Datasets ou arquivos alterados desde o treino de origem.")
+        original = checkpoint.get("config_treino", {})
+        esperado = {
+            "learning_rate": self.learning_rate,
+            "batch_size": self.batch_size,
+            "intervalo_validacao": self.intervalo_validacao,
+            "paciencia": self.paciencia,
+            "seed": self.seed,
+            "balancear_origens": self.balancear_origens,
+            "usar_augmentation": self.usar_augmentation,
+            "bases": list(self.bases_ativas),
+        }
+        for chave, valor in esperado.items():
+            if original.get(chave) != valor:
+                raise ValueError(f"A configuracao '{chave}' difere da origem.")
+        self.epocas_origem = int(checkpoint["epoca"])
+        if self.num_epochs <= self.epocas_origem:
+            raise ValueError("Limite de epocas nao supera o da origem.")
+        if self.epocas_origem != int(original.get("num_epochs", -1)):
+            raise ValueError("Origem nao chegou ao limite configurado de epocas.")
+        if checkpoint.get("interrompido_por_paciencia"):
+            raise ValueError("Nao e permitido continuar um treino encerrado por paciencia.")
+
+        with caminho_historico.open("r", newline="", encoding="utf-8-sig") as arq:
+            historico = []
+            for linha in csv.DictReader(arq):
+                historico.append({"epoca": int(linha["epoca"]),
+                                  **{campo: float(linha[campo])
+                                     for campo in ("train_loss", "train_acc", "val_loss", "val_acc")}})
+        if not historico or historico[-1]["epoca"] != self.epocas_origem:
+            raise ValueError("Historico nao corresponde a ultima epoca do checkpoint.")
+        self.historico = historico
+        self.epocas_executadas = self.epocas_origem
+        melhor_salvo = checkpoint.get("melhor_val_loss")
+        self.melhor_val_loss = float(
+            melhor_salvo if melhor_salvo is not None else min(
+                linha["val_loss"] for linha in historico
+                if math.isfinite(linha["val_loss"])
+            )
+        )
+        self.melhor_epoca = checkpoint.get("melhor_epoca")
+        if self.melhor_epoca is None:
+            validas = [linha for linha in historico if math.isfinite(linha["val_loss"])]
+            self.melhor_epoca = min(validas, key=lambda linha: linha["val_loss"])["epoca"]
+        self.validacoes_sem_melhoria = int(checkpoint.get("validacoes_sem_melhoria", 0))
+        self.modelo.load_state_dict(checkpoint["model_state_dict"])
+        estado_adam = checkpoint.get("optimizer_state_dict")
+        if estado_adam:
+            self.otimizador.load_state_dict(estado_adam)
+            # Carregamento em CPU pode requerer transferencia dos buffers ao device.
+            for estados in self.otimizador.state.values():
+                for chave, valor in estados.items():
+                    if isinstance(valor, torch.Tensor) and chave != "step":
+                        estados[chave] = valor.to(self.device)
+            self.estado_otimizador_retomado = "restaurado"
+        else:
+            self.estado_otimizador_retomado = "reinicializado_checkpoint_antigo"
+        estado_rng = checkpoint.get("rng_state")
+        if not estado_adam or not estado_rng:
+            raise ValueError(
+                "Checkpoint antigo sem estado completo de Adam/RNG. "
+                "Refaca o Grid Search inicial com esta versao."
+            )
+        self._restaurar_rng(estado_rng)
+        shutil.copy2(caminho_melhor, self.pasta_execucao / "modelo_melhor.pt")
+        salvar_historico_csv(self.historico, self.pasta_execucao / "historico_treinamento.csv")
+        self._salvar_dados_graficos()
+        print(f"CONTINUACAO: epoca {self.epocas_origem} ate {self.num_epochs}; "
+              f"Adam: {self.estado_otimizador_retomado}; paciencia atual: "
+              f"{self.validacoes_sem_melhoria}/{self.paciencia}")
+
     def _salvar_checkpoint(self, caminho, epoca, val_loss=None, val_acc=None):
         """Salva pesos e metadados necessarios para reproduzir a inferencia."""
 
         checkpoint = {
-            "model_name": "LeNet5",
+            "model_name": self.nome_modelo,
+            "model_class": self.modelo.__class__.__name__,
+            "config_modelo": dict(self.parametros_modelo),
             "model_state_dict": self.modelo.state_dict(),
             "classes": list(self.classes),
             "class_to_idx": dict(self.class_to_idx),
             "input_shape": list(self.input_shape),
             "num_classes": len(self.classes),
+            "assinatura_dados": self.assinatura_dados,
             "epoca": int(epoca),
+            "epocas_executadas": int(self.epocas_executadas),
+            "interrompido_por_paciencia": bool(self.interrompido_por_paciencia),
+            "paciencia_atingida": bool(self.interrompido_por_paciencia),
+            "limite_epocas_atingido": bool(self.epocas_executadas >= self.num_epochs),
+            "motivo_parada": (
+                "paciencia" if self.interrompido_por_paciencia
+                else "limite_epocas" if self.epocas_executadas >= self.num_epochs
+                else "em_andamento"
+            ),
+            "validacoes_sem_melhoria": int(self.validacoes_sem_melhoria),
             "val_loss": None if val_loss is None else float(val_loss),
             "val_acc": None if val_acc is None else float(val_acc),
+            "melhor_val_loss": float(self.melhor_val_loss),
+            "melhor_epoca": self.melhor_epoca,
+            "optimizer_state_dict": (
+                self.otimizador.state_dict() if self.salvar_historico_incremental
+                and self.otimizador is not None else None
+            ),
+            "rng_state": (self._capturar_rng() if self.salvar_historico_incremental else None),
+            "estado_otimizador_retomado": self.estado_otimizador_retomado,
             "config_treino": {
                 "num_epochs": self.num_epochs,
                 "batch_size": self.batch_size,
                 "learning_rate": self.learning_rate,
                 "intervalo_validacao": self.intervalo_validacao,
+                "paciencia": self.paciencia,
                 "seed": self.seed,
                 "balancear_origens": self.balancear_origens,
                 "usar_augmentation": self.usar_augmentation,
                 "bases": list(self.bases_ativas),
+                "usar_cuda": self.usar_cuda,
+                "num_workers": self.num_workers,
             },
         }
 
-        torch.save(checkpoint, caminho)
+        temporario = Path(str(caminho) + ".tmp")
+        torch.save(checkpoint, temporario)
+        os.replace(temporario, caminho)
 
-    def _salvar_informacoes(self, inicio, fim):
+    def _salvar_informacoes(self, inicio, fim, metricas_finais):
         """Salva um resumo textual da configuracao e dos resultados principais."""
 
         linhas = [
@@ -549,7 +872,9 @@ class TreinoProcessor:
             f"Duracao_s: {(fim - inicio).total_seconds():.3f}",
             "",
             "MODELO",
-            "LeNet5",
+            f"Identificador: {self.nome_modelo}",
+            f"Classe: {self.modelo.__class__.__name__}",
+            f"Parametros da arquitetura: {self.parametros_modelo}",
             f"Input shape: {self.input_shape}",
             f"Classes: {', '.join(self.classes)}",
             "",
@@ -566,17 +891,51 @@ class TreinoProcessor:
             f"Batch size: {self.batch_size}",
             f"Learning rate: {self.learning_rate}",
             f"Intervalo validacao: {self.intervalo_validacao}",
+            f"Paciencia: {self.paciencia if self.paciencia is not None else 'desativada'}",
+            f"Epocas executadas: {self.epocas_executadas}",
+            f"Interrompido por paciencia: {self.interrompido_por_paciencia}",
+            f"Limite de epocas atingido: {self.epocas_executadas >= self.num_epochs}",
+            f"Motivo da parada: {'paciencia' if self.interrompido_por_paciencia else 'limite_epocas' if self.epocas_executadas >= self.num_epochs else 'erro'}",
+            f"Validacoes sem melhoria ao final: {self.validacoes_sem_melhoria}",
             f"Seed: {self.seed}",
+            f"Continuacao de: {self.continuar_de if self.continuar_de else 'nao'}",
+            f"Epocas de origem: {self.epocas_origem}",
+            f"Estado do Adam na retomada: {self.estado_otimizador_retomado}",
             f"Device: {self.device}",
             "",
             "MELHOR VALIDACAO",
             f"Epoca: {self.melhor_epoca}",
             f"Val loss: {self.melhor_val_loss}",
+            "",
+            "MODELO FINAL - TREINO",
+            f"Loss: {metricas_finais['treino_final']['loss']:.6f}",
+            f"Accuracy: {metricas_finais['treino_final']['accuracy']:.6f}",
+            f"Balanced accuracy: {metricas_finais['treino_final']['balanced_accuracy']:.6f}",
+            f"F1 macro: {metricas_finais['treino_final']['f1_macro']:.6f}",
+            f"MCC: {metricas_finais['treino_final']['mcc']:.6f}",
+            "",
+            "MODELO FINAL - VALIDACAO",
+            f"Loss: {metricas_finais['validacao_final']['loss']:.6f}",
+            f"Accuracy: {metricas_finais['validacao_final']['accuracy']:.6f}",
+            f"Balanced accuracy: {metricas_finais['validacao_final']['balanced_accuracy']:.6f}",
+            f"F1 macro: {metricas_finais['validacao_final']['f1_macro']:.6f}",
+            f"MCC: {metricas_finais['validacao_final']['mcc']:.6f}",
         ]
 
         (self.pasta_execucao / "informacoes_treinamento.txt").write_text(
             "\n".join(linhas),
             encoding="utf-8",
+        )
+
+    def _salvar_dados_graficos(self):
+        """Salva arrays de historico para regeneracao futura dos graficos."""
+
+        np.savez_compressed(
+            self.pasta_execucao / "dados_graficos.npz",
+            **{
+                campo: np.asarray([item[campo] for item in self.historico])
+                for campo in ("epoca", "train_loss", "train_acc", "val_loss", "val_acc")
+            },
         )
 
     def executar(self):
@@ -600,18 +959,23 @@ class TreinoProcessor:
         if not self.amostras_val:
             raise RuntimeError("Nenhuma amostra permaneceu em val.")
 
+        self.assinatura_dados = self._assinar_amostras()
         self._mostrar_plano()
         self._configurar_dispositivo()
 
-        inicio = self._criar_pasta_resultados()
+        inicio = datetime.now()
         train_loader, val_loader = self._criar_loaders()
         self._inicializar_modelo(train_loader)
+        self._criar_pasta_resultados(inicio)
 
         criterio = nn.CrossEntropyLoss()
         otimizador = torch.optim.Adam(
             self.modelo.parameters(),
             lr=self.learning_rate,
         )
+        self.otimizador = otimizador
+        if self.continuar_de is not None:
+            self._carregar_continuacao()
 
         print("\n" + "=" * 90)
         print("INICIANDO TREINAMENTO")
@@ -619,12 +983,16 @@ class TreinoProcessor:
 
         inicio_loop = time.perf_counter()
 
-        for epoca in range(1, self.num_epochs + 1):
+        for epoca in range(self.epocas_origem + 1, self.num_epochs + 1):
             train_loss, train_acc = self._treinar_epoca(
                 train_loader,
                 criterio,
                 otimizador,
             )
+
+            # Registra a ultima epoca realmente executada. Isso e importante
+            # quando o early stopping encerra o treinamento antes de NUM_EPOCHS.
+            self.epocas_executadas = epoca
 
             # Valida na primeira epoca, no intervalo configurado e na ultima.
             executar_validacao = (
@@ -633,19 +1001,28 @@ class TreinoProcessor:
                 or epoca == self.num_epochs
             )
 
+            houve_melhoria = False
+
             if executar_validacao:
                 val_loss, val_acc = self._avaliar(val_loader, criterio)
 
                 # O melhor modelo e definido pela menor loss de validacao.
+                # Qualquer reducao estrita da val_loss conta como melhoria e
+                # reinicia o contador de paciencia.
                 if val_loss < self.melhor_val_loss:
+                    houve_melhoria = True
                     self.melhor_val_loss = val_loss
                     self.melhor_epoca = epoca
+                    self.validacoes_sem_melhoria = 0
+
                     self._salvar_checkpoint(
                         self.pasta_execucao / "modelo_melhor.pt",
                         epoca=epoca,
                         val_loss=val_loss,
                         val_acc=val_acc,
                     )
+                else:
+                    self.validacoes_sem_melhoria += 1
             else:
                 val_loss = math.nan
                 val_acc = math.nan
@@ -660,17 +1037,48 @@ class TreinoProcessor:
                 }
             )
 
+            if self.salvar_historico_incremental:
+                salvar_historico_csv(
+                    self.historico,
+                    self.pasta_execucao / "historico_treinamento.csv",
+                )
+                self._salvar_dados_graficos()
+
             if executar_validacao:
+                estado_melhoria = "melhorou" if houve_melhoria else (
+                    f"sem melhora {self.validacoes_sem_melhoria}/"
+                    f"{self.paciencia}"
+                    if self.paciencia is not None
+                    else "sem melhora"
+                )
+
                 print(
                     f"Epoca {epoca:>4}/{self.num_epochs} | "
                     f"train loss={train_loss:.6f} acc={train_acc:.4f} | "
-                    f"val loss={val_loss:.6f} acc={val_acc:.4f}"
+                    f"val loss={val_loss:.6f} acc={val_acc:.4f} | "
+                    f"{estado_melhoria}"
                 )
             else:
                 print(
                     f"Epoca {epoca:>4}/{self.num_epochs} | "
                     f"train loss={train_loss:.6f} acc={train_acc:.4f}"
                 )
+
+            # PACIENCIA conta validacoes consecutivas sem reducao da val_loss.
+            # Portanto, com PACIENCIA=10 e INTERVALO_VALIDACAO=5, por exemplo,
+            # o criterio pode abranger varias dezenas de epocas.
+            if (
+                executar_validacao
+                and self.paciencia is not None
+                and self.validacoes_sem_melhoria >= self.paciencia
+            ):
+                self.interrompido_por_paciencia = True
+                print(
+                    "\nEARLY STOPPING: treinamento interrompido apos "
+                    f"{self.validacoes_sem_melhoria} validacoes consecutivas "
+                    "sem melhoria da val_loss."
+                )
+                break
 
         duracao_loop = time.perf_counter() - inicio_loop
 
@@ -686,7 +1094,7 @@ class TreinoProcessor:
 
         self._salvar_checkpoint(
             self.pasta_execucao / "modelo_final.pt",
-            epoca=self.num_epochs,
+            epoca=self.epocas_executadas,
             val_loss=None if ultima_validacao is None else ultima_validacao["val_loss"],
             val_acc=None if ultima_validacao is None else ultima_validacao["val_acc"],
         )
@@ -695,13 +1103,22 @@ class TreinoProcessor:
             self.historico,
             self.pasta_execucao / "historico_treinamento.csv",
         )
+        if self.salvar_historico_incremental:
+            self._salvar_dados_graficos()
         plotar_historico(
             self.historico,
             self.pasta_execucao / "historico_treinamento.png",
         )
 
+        metricas_finais = self._salvar_metricas_finais(
+            train_loader,
+            val_loader,
+            criterio,
+        )
+
         fim = datetime.now()
-        self._salvar_informacoes(inicio, fim)
+        self._salvar_informacoes(inicio, fim, metricas_finais)
+        self._finalizar_pasta_resultados(inicio, fim)
 
         print("\n" + "=" * 90)
         print("TREINAMENTO FINALIZADO")
@@ -709,18 +1126,34 @@ class TreinoProcessor:
         print(f"Resultados             : {self.pasta_execucao}")
         print(f"Melhor epoca           : {self.melhor_epoca}")
         print(f"Melhor val loss        : {self.melhor_val_loss:.6f}")
+        print(f"Epocas executadas      : {self.epocas_executadas}")
+        print(f"Early stopping         : {self.interrompido_por_paciencia}")
         print(f"Tempo do loop [s]      : {duracao_loop:.3f}")
         print("Test                    : nao utilizado")
 
         return {
+            "model_name": self.nome_modelo,
             "pasta_resultados": self.pasta_execucao,
             "modelo_melhor": self.pasta_execucao / "modelo_melhor.pt",
             "modelo_final": self.pasta_execucao / "modelo_final.pt",
             "historico": self.historico,
             "melhor_epoca": self.melhor_epoca,
             "melhor_val_loss": self.melhor_val_loss,
+            "paciencia": self.paciencia,
+            "epocas_executadas": self.epocas_executadas,
+            "interrompido_por_paciencia": self.interrompido_por_paciencia,
+            "paciencia_atingida": self.interrompido_por_paciencia,
+            "limite_epocas_atingido": self.epocas_executadas >= self.num_epochs,
+            "motivo_parada": (
+                "paciencia" if self.interrompido_por_paciencia
+                else "limite_epocas" if self.epocas_executadas >= self.num_epochs
+                else "erro"
+            ),
+            "limite_epocas": self.num_epochs,
+            "validacoes_sem_melhoria": self.validacoes_sem_melhoria,
             "classes": self.classes,
             "input_shape": self.input_shape,
             "train_total": len(self.amostras_train),
             "val_total": len(self.amostras_val),
+            "metricas_finais": metricas_finais,
         }
